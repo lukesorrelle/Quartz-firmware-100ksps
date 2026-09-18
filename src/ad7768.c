@@ -103,15 +103,14 @@ downsampleInfo(int rate)
      */
     int i;
     static struct downSampleInfo const downSampleTable[] = {
-        /* 20.48 MHz / 32 / 4 = 160 kSPS */
-        { 160000, MCLK_CSR_W_20p480, CHAN_MODE_DEC_32, POWER_MODE_MCLK_DIV_4 },
-
+       { 250000, MCLK_CSR_W_32p000, CHAN_MODE_DEC_32, POWER_MODE_MCLK_DIV_4 },
+       /* 20.48 MHz / 32 / 4 = 160 kSPS */
+       { 160000, MCLK_CSR_W_20p480, CHAN_MODE_DEC_32, POWER_MODE_MCLK_DIV_4 },
         /* 25.6 MHz / 64 / 4 = 100 kSPS */
-        { 100000, MCLK_CSR_W_25p600, CHAN_MODE_DEC_64, POWER_MODE_MCLK_DIV_4 },
-
-        { 25000, MCLK_CSR_W_25p600, CHAN_MODE_DEC_256, POWER_MODE_MCLK_DIV_4 },
-        { 5000, MCLK_CSR_W_20p480, CHAN_MODE_DEC_1024, POWER_MODE_MCLK_DIV_4 },
-        { 1000, MCLK_CSR_W_16p384, CHAN_MODE_DEC_512,  POWER_MODE_MCLK_DIV_32 },
+       { 100000, MCLK_CSR_W_25p600, CHAN_MODE_DEC_64, POWER_MODE_MCLK_DIV_4 },
+       { 25000, MCLK_CSR_W_25p600, CHAN_MODE_DEC_256, POWER_MODE_MCLK_DIV_4 },
+       { 5000, MCLK_CSR_W_20p480, CHAN_MODE_DEC_1024, POWER_MODE_MCLK_DIV_4 },
+       { 1000, MCLK_CSR_W_16p384, CHAN_MODE_DEC_512, POWER_MODE_MCLK_DIV_32 },
     };
     static struct downSampleInfo const * dpOld = &downSampleTable[1];
     if (rate <= 0) {
