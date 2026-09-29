@@ -130,7 +130,14 @@ downsampleInfo(int rate)
         }
     }
     printf("CRITICAL WARNING -- %d samples/second not supported.\n", rate);
-    dpOld = NULL;
+    /*
+     * Leave dpOld pointing at the last successfully-applied rate (or the
+     * legacy default, if none has been applied yet) rather than NULLing it
+     * out here. This call's own caller still gets NULL and rejects this
+     * particular bad rate, but a later AD7768 reset -- which calls
+     * ad7768SetSamplingRate(0) to reapply "the last known good rate" -- must
+     * not be permanently broken by one bad write from a misbehaving client.
+     */
     return NULL;
 }
 
