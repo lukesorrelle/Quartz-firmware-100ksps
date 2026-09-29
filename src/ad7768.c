@@ -113,7 +113,8 @@ downsampleInfo(int rate)
        { 5000, MCLK_CSR_W_20p480, CHAN_MODE_DEC_1024, POWER_MODE_MCLK_DIV_4 },
        { 1000, MCLK_CSR_W_16p384, CHAN_MODE_DEC_512, POWER_MODE_MCLK_DIV_32 },
     };
-    static struct downSampleInfo const * dpOld = &downSampleTable[1];
+    /* Keep the legacy reset default at 50 kSPS after adding faster rates. */
+    static struct downSampleInfo const * dpOld = &downSampleTable[3];
     if (rate <= 0) {
         return dpOld;
     }
