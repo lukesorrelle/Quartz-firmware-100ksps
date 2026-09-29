@@ -79,15 +79,23 @@ end
 localparam MCLK_RATE_WIDTH = 28;
 (*ASYNC_REG="true"*) reg mclk_m;
 reg mclk_d0, mclk_d1, mclkRising;
-reg [MCLK_RATE_WIDTH-1:0] mclkCounter, mclkRate;
+reg [MCLK_RATE_WIDTH-1:0] mclkCounter = 0, mclkRate = 0;
 reg [3:0] acqPPScounter = 0;
 wire acqPPSstretch = acqPPScounter[3];
+// acqPPSstrobe may be a multi-cycle level (e.g. the EVG's locally-derived
+// ppsMarker, stretched for ~10us by marbleClockSync) rather than a single
+// acqClk-wide pulse. Detect its rising edge so the block below samples/
+// resets mclkCounter exactly once per PPS instead of on every cycle the
+// level stays high, which would otherwise overwrite mclkRate with 0/1.
+reg acqPPSstrobe_d = 0;
+wire acqPPSrising = acqPPSstrobe && !acqPPSstrobe_d;
 always @(posedge acqClk) begin
+    acqPPSstrobe_d <= acqPPSstrobe;
     mclk_m  <= MCLK;
     mclk_d0 <= mclk_m;
     mclk_d1 <= mclk_d0;
     mclkRising <= (mclk_d0 && !mclk_d1);
-    if (acqPPSstrobe) begin
+    if (acqPPSrising) begin
         mclkRate <= mclkCounter;
         if (mclkRising) begin
             mclkCounter <= 1;

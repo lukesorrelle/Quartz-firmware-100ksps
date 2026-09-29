@@ -467,6 +467,10 @@ ad7768 #(
     .adcRESETn(ad7768reset_n));
 
 // Need different MCLK values to get the sampling rates we need.
+// MCLK synchronization PPS source.
+// On an EVG node, use the local hardware-derived PPS marker.
+// On an EVR node, use the PPS received through the event stream.
+wire mclkPPSstrobe = isEVG ? ppsMarker : acqPPSstrobe;
 mclkSelect #(.DEBUG("false"))
   mclkSelect (
     .sysClk(sysClk),
@@ -474,7 +478,7 @@ mclkSelect #(.DEBUG("false"))
     .sysGPIO_OUT(GPIO_OUT),
     .sysStatus(GPIO_IN[GPIO_IDX_MCLK_SELECT_CSR]),
     .acqClk(acqClk),
-    .acqPPSstrobe(acqPPSstrobe),
+    .acqPPSstrobe(mclkPPSstrobe),
     .clk32p768(clk32p768),
     .clk40p96(clk40p96),
     .clk51p2(clk51p2),

@@ -1,3 +1,4 @@
 [submodule "Workspace/NASA_ACQ"]
 	path = Workspace/NASA_ACQ
-	url = https://github.com/osprey-dcs/Quartz-firmware.git
+	url = https://github.com/lukesorrelle/Quartz-firmware-100ksps.git
+	branch = ad7768-sample-rates
