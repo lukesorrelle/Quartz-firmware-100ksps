@@ -4,8 +4,9 @@
 Requires the bundled Bedrock LEEP client and NumPy. See README_sample_rate_test.md.
 By default the script does not program flash or reboot the board. The optional
 --boot-app path uses Alluvium to clear the boot error state and boot the app image.
-The test changes ADC rates, temporarily uses a diagnostic debug flag to trigger
-the DRDY recorder, then restores an explicitly requested rate and runtime debug mask.
+The test changes ADC rates, deterministically triggers the DRDY recorder (see
+trigger_recorder()) to independently measure the new rates' physical DRDY
+cadence, then restores an explicitly requested rate and runtime debug mask.
 """
 
 from __future__ import annotations
@@ -42,9 +43,19 @@ REG_ADC_ALIGNMENT_COUNT = 294
 REG_AD7768_MCLK_HZ = 295  # sysmon bank 0xC0, index 3
 
 GPIO_DRDY_MISALIGNED = 0x8000_0000
-GPIO_RECORDER_ACTIVE = 0x8000_0000
 DEBUGFLAG_DUMP_AD7768_REG = 0x0000_2000
 DEBUGFLAG_ENABLE_DRDY_FAULT = 0x0020_0000
+
+# Only the first this-many samples of the 131,072-sample recorder buffer are
+# used for DRDY rate analysis (settled steady-state history; see
+# analyze_drdy_capture()).
+DRDY_ANALYSIS_SAMPLE_COUNT = 100_000
+
+# Extra margin (well over 10x) above ad7768recorder.v's PRE_TRIGGER_LOAD
+# duration (SAMPLE_COUNT - SAMPLE_COUNT/8 - 2 acqClk cycles, ~0.92ms at
+# 125MHz) so the second recorder-arm write in trigger_recorder() reliably
+# lands after the state machine has reached ST_AWAIT_TRIGGER.
+RECORDER_ARM_TO_TRIGGER_DELAY_S = 0.010
 
 # These flags trigger one-shot actions when the console receives a debug command.
 DEBUGFLAG_ONESHOT_MASK = (
@@ -94,7 +105,12 @@ RATE_SPECS = {
 # Test the added rates first, then every previously supported rate.
 DEFAULT_RATE_ORDER = (100_000, 160_000, 250_000, 50_000, 25_000, 5_000, 1_000)
 NEW_RATES = {100_000, 160_000}
-RESET_DEFAULT_RATE = 50_000
+# NOTE: there is no single "reset default" rate to check against. downsampleInfo()'s
+# dpOld fallback (used by ad7768SetSamplingRate(0), which ad7768Reset(0) calls) starts
+# out pointing at the 50 kSPS table entry, but is reassigned to whichever rate was most
+# recently selected successfully. So resetting the AD7768 after this sweep restores
+# whatever rate this script tested *last*, not unconditionally 50 kSPS -- the reset
+# check below tracks that explicitly instead of assuming a fixed value.
 
 
 class TestFailure(RuntimeError):
@@ -354,6 +370,8 @@ def analyze_drdy_capture(data: bytes, spec: RateSpec, tolerance_percent: float) 
     samples = struct.unpack(f"<{RECORDER_SAMPLE_COUNT}H", data)
     if any(sample & ~0x1FF for sample in samples):
         raise TestFailure("DRDY capture contains bits outside the 9-bit recorder word")
+    # Analyze only the settled leading portion of the buffer.
+    samples = samples[:DRDY_ANALYSIS_SAMPLE_COUNT]
 
     measurements = []
     for chip in range(ADC_CHIP_COUNT):
@@ -432,15 +450,36 @@ def check_adc_status(status_word: int, allow_no_clock: bool = False) -> list[int
 
 
 def wait_recorder(board: Board, timeout: float) -> None:
+    # REG_AD7768_RECORDER reads ad7768recorderIsBusy(), a plain C boolean
+    # (0 or 1) -- NOT a bit-31 flag on the raw recorder CSR. (epics.c's
+    # readReg() returns that function's result directly.)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if not (board.read(REG_AD7768_RECORDER) & GPIO_RECORDER_ACTIVE):
+        if board.read(REG_AD7768_RECORDER) == 0:
             return
         time.sleep(0.05)
     raise TestFailure(
-        "DRDY recorder did not complete. The diagnostic rate change may not have "
-        "triggered the recorder; check board timing and ADC wiring."
+        "DRDY recorder did not complete. The arm/trigger sequence may not have "
+        "reached the FPGA; check board timing and ADC wiring."
     )
+
+
+def trigger_recorder(board: Board, timeout: float) -> None:
+    """Arm the DRDY/DCLK recorder, then force a deterministic trigger.
+
+    ad7768recorder.v's state machine: the first CSR write (bit 31 set, which
+    toggles sysArmToggle) takes it from ST_IDLE through ST_FILL (recording
+    starts immediately) to ST_AWAIT_TRIGGER once PRE_TRIGGER_LOAD acqClk
+    cycles have elapsed (~0.92ms at 125MHz). ST_AWAIT_TRIGGER triggers on
+    EITHER a real DRDY misalignment OR another sysArmToggle edge -- so a
+    second CSR write, issued after waiting comfortably past that ~0.92ms
+    fill period, deterministically triggers a capture of purely normal,
+    steady-state DRDY activity without needing to induce a real fault.
+    """
+    board.write(REG_AD7768_RECORDER, 1)
+    time.sleep(RECORDER_ARM_TO_TRIGGER_DELAY_S)
+    board.write(REG_AD7768_RECORDER, 1)
+    wait_recorder(board, timeout)
 
 
 def wait_for_rate(board: Board, spec: RateSpec, align_before: int,
@@ -565,9 +604,9 @@ def main() -> int:
         + ("It first clears the boot error state and reboots into the app image. "
            if args.boot_app else "")
         + "It briefly resets the AD7768 chips, "
-        "changes ADC rate and syncs, temporarily overrides runtime debug flags, "
-        "and deliberately creates a "
-        "brief DRDY mismatch for each new rate. It restores the requested rate "
+        "changes ADC rate and syncs, and for each new rate arms and triggers "
+        "the FPGA's DRDY recorder to independently measure the physical "
+        "sample cadence. It restores the requested rate "
         f"({args.restore_rate} SPS) and debug mask (0x{args.restore_debug_flags:X})."
     )
     if args.yes:
@@ -652,7 +691,7 @@ def main() -> int:
                 raise TestFailure(f"code hash {actual_hash} does not match {expected_hash}")
         if reset_state != 0:
             raise TestFailure("AD7768 is in reset; refusing to change sample rate")
-        if recorder_status & GPIO_RECORDER_ACTIVE:
+        if recorder_status != 0:
             raise TestFailure("AD7768 DRDY recorder is already active; refusing to disturb it")
         initial_statuses = check_adc_status(adc_status, allow_no_clock=True)
         if any(status & 0x04 for status in initial_statuses):
@@ -661,41 +700,14 @@ def main() -> int:
         if drdy_status & GPIO_DRDY_MISALIGNED:
             print("Warning: DRDY was misaligned before the test; each tested rate must clear it.")
 
+        last_rate = None
         for rate in args.rates:
             spec = RATE_SPECS[rate]
             drdy_result = None
             align_before = board.read(REG_ADC_ALIGNMENT_COUNT)
 
-            if rate in NEW_RATES:
-                # This firmware diagnostic writes each chip's channel-mode
-                # register separately to create a brief DRDY mismatch. The FPGA
-                # recorder captures the normal steady-state cadence around it.
-                set_debug(DEBUGFLAG_ENABLE_DRDY_FAULT)
-                recorder_may_be_active = True
-                # From this point cleanup should issue and verify the requested
-                # restore rate even if arming or the diagnostic write times out.
-                rate_write_attempted = True
-                board.write(REG_AD7768_RECORDER, 1)
-                board.write(REG_SAMPLING_RATE, rate)
-                wait_recorder(board, args.timeout)
-                recorder_may_be_active = False
-
-                capture = tftp_get(
-                    args.host, "AD7768_DRDY.bin", args.tftp_port, args.network_timeout
-                )
-                if len(capture) != RECORDER_FILE_BYTES:
-                    raise TestFailure(
-                        f"TFTP recorder file is {len(capture)} bytes; "
-                        f"expected {RECORDER_FILE_BYTES}"
-                    )
-                capture_path = output_dir / f"AD7768_DRDY_{rate}.bin"
-                capture_path.write_bytes(capture)
-                drdy_result = analyze_drdy_capture(
-                    capture, spec, args.drdy_tolerance_percent
-                )
-            else:
-                rate_write_attempted = True
-                board.write(REG_SAMPLING_RATE, rate)
+            rate_write_attempted = True
+            board.write(REG_SAMPLING_RATE, rate)
 
             observed = wait_for_rate(
                 board,
@@ -712,6 +724,30 @@ def main() -> int:
             registers = console.dump_adc_registers()
             validate_adc_configuration(spec, registers)
 
+            if rate in NEW_RATES:
+                # Independently confirm the physical DRDY cadence for the new
+                # rates by capturing the FPGA's logic-analyzer recorder, once
+                # the rate above has already settled into steady state. See
+                # trigger_recorder() for how the deterministic (non-fault)
+                # trigger works.
+                recorder_may_be_active = True
+                trigger_recorder(board, args.timeout)
+                recorder_may_be_active = False
+
+                capture = tftp_get(
+                    args.host, "AD7768_DRDY.bin", args.tftp_port, args.network_timeout
+                )
+                if len(capture) != RECORDER_FILE_BYTES:
+                    raise TestFailure(
+                        f"TFTP recorder file is {len(capture)} bytes; "
+                        f"expected {RECORDER_FILE_BYTES}"
+                    )
+                capture_path = output_dir / f"AD7768_DRDY_{rate}.bin"
+                capture_path.write_bytes(capture)
+                drdy_result = analyze_drdy_capture(
+                    capture, spec, args.drdy_tolerance_percent
+                )
+
             result = {
                 "rate_hz": rate,
                 "mclk_hz": observed["mclk_hz"],
@@ -723,10 +759,16 @@ def main() -> int:
             }
             report["rate_results"].append(result)
             print_rate_result(spec, observed, drdy_result)
+            last_rate = rate
 
-        # Exercise the ADC-reset initialization path after cycling rates. The
-        # legacy reset default is 50 kSPS and is verified from MCLK and SPI regs.
-        reset_spec = RATE_SPECS[RESET_DEFAULT_RATE]
+        # Exercise the ADC-reset initialization path after cycling rates.
+        # ad7768SetSamplingRate(0) (called by ad7768Reset(0)) restores
+        # whichever rate was selected last, NOT a fixed default (see the
+        # NEW_RATES/dpOld comment above) -- so verify against last_rate.
+        if last_rate is None:
+            raise TestFailure("No sampling rate was successfully verified before the reset test")
+        reset_rate = last_rate
+        reset_spec = RATE_SPECS[reset_rate]
         align_before = board.read(REG_ADC_ALIGNMENT_COUNT)
         rate_write_attempted = True  # Ensure cleanup restores after any reset error.
         reset_may_be_active = True
@@ -744,8 +786,8 @@ def main() -> int:
         reset_statuses = check_adc_status(board.read(REG_AD7768_STATUSES))
         reset_registers = console.dump_adc_registers()
         validate_adc_configuration(reset_spec, reset_registers)
-        report["reset_default_check"] = {
-            "rate_hz": RESET_DEFAULT_RATE,
+        report["reset_restore_check"] = {
+            "rate_hz": reset_rate,
             "mclk_hz": reset_observed["mclk_hz"],
             "decimation": reset_spec.decimation,
             "channel_mode": reset_spec.channel_mode,
@@ -753,7 +795,8 @@ def main() -> int:
             "adc_status_bytes": reset_statuses,
         }
         print_rate_result(reset_spec, reset_observed, None)
-        print("     AD7768 reset path restored the expected 50 kSPS default.")
+        print(f"     AD7768 reset path restored the previously selected "
+              f"{reset_rate} SPS rate.")
 
         report["test_passed"] = True
 
@@ -774,16 +817,12 @@ def main() -> int:
                 print(f"CLEANUP ERROR releasing AD7768 reset: {exc}", file=sys.stderr)
 
         if board is not None and recorder_may_be_active:
-            if console is not None:
-                try:
-                    set_debug(DEBUGFLAG_ENABLE_DRDY_FAULT)
-                except Exception as exc:
-                    report["cleanup_errors"].append(
-                        f"Could not enable recorder trigger during cleanup: {exc}"
-                    )
             try:
-                # A second rate change should trigger an already-armed recorder.
-                board.write(REG_SAMPLING_RATE, args.restore_rate)
+                # trigger_recorder() didn't complete (e.g. a dropped UDP
+                # packet ate its second arm write while the recorder sat in
+                # ST_AWAIT_TRIGGER). One more toggle write forces a trigger
+                # from there; harmless if it's actually stuck elsewhere.
+                board.write(REG_AD7768_RECORDER, 1)
                 wait_recorder(board, min(args.timeout, 5.0))
                 recorder_may_be_active = False
             except Exception as exc:

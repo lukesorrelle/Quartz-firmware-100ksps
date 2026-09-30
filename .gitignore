@@ -1,1 +1,6 @@
 src/softwareBuildDate.h
+
+# Python cache/backup files that accumulate under scripts/ and bedrock/
+# during hardware testing/development.
+__pycache__/
+*.before-*
