@@ -468,9 +468,10 @@ ad7768 #(
 
 // Need different MCLK values to get the sampling rates we need.
 // MCLK synchronization PPS source.
-// On an EVG node, use the local hardware-derived PPS marker.
-// On an EVR node, use the PPS received through the event stream.
-wire mclkPPSstrobe = isEVG ? ppsMarker : acqPPSstrobe;
+// Use the received PPS on every node so ADC synchronization and DRDY timing
+// share the same reference. The EVG's local PPS precedes the received marker
+// by the event transport latency.
+wire mclkPPSstrobe = acqPPSstrobe;
 mclkSelect #(.DEBUG("false"))
   mclkSelect (
     .sysClk(sysClk),
